@@ -1,0 +1,905 @@
+#include <Arduino.h>
+#include <WiFi.h>
+#include <WebServer.h>
+#include <driver/i2s.h>
+#include <SPI.h>
+#include <SD.h>
+
+// =====================================================
+// WIFI
+// =====================================================
+
+const char* WIFI_SSID = "Speed@More";
+const char* WIFI_PASSWORD = "More@15171602@04";
+
+WebServer server(80);
+
+
+// =====================================================
+// INMP441
+// =====================================================
+
+#define I2S_PORT I2S_NUM_0
+
+#define I2S_SCK  32
+#define I2S_WS   25
+#define I2S_SD   33
+
+
+// =====================================================
+// MICRO SD
+// =====================================================
+
+#define SD_CS    5
+#define SD_SCK   18
+#define SD_MISO  19
+#define SD_MOSI  23
+
+
+// =====================================================
+// BUTTON
+// =====================================================
+
+#define BUTTON_PIN 4
+
+
+// =====================================================
+// AUDIO
+// =====================================================
+
+#define SAMPLE_RATE       16000
+#define BITS_PER_SAMPLE   16
+#define CHANNELS          1
+#define RECORD_SECONDS    10
+
+
+// =====================================================
+// WAV HEADER
+// =====================================================
+
+void writeWavHeader(File &file, uint32_t dataSize)
+{
+  uint32_t fileSize = dataSize + 36;
+
+  uint16_t audioFormat = 1;
+  uint16_t numChannels = CHANNELS;
+
+  uint32_t sampleRate = SAMPLE_RATE;
+
+  uint32_t byteRate =
+      SAMPLE_RATE *
+      CHANNELS *
+      BITS_PER_SAMPLE / 8;
+
+  uint16_t blockAlign =
+      CHANNELS *
+      BITS_PER_SAMPLE / 8;
+
+  uint16_t bitsPerSample =
+      BITS_PER_SAMPLE;
+
+  uint32_t subChunk1Size = 16;
+
+  file.seek(0);
+
+  // RIFF
+  file.write(
+      (const uint8_t*)"RIFF",
+      4
+  );
+
+  file.write(
+      (uint8_t*)&fileSize,
+      4
+  );
+
+  // WAVE
+  file.write(
+      (const uint8_t*)"WAVE",
+      4
+  );
+
+  // fmt
+  file.write(
+      (const uint8_t*)"fmt ",
+      4
+  );
+
+  file.write(
+      (uint8_t*)&subChunk1Size,
+      4
+  );
+
+  file.write(
+      (uint8_t*)&audioFormat,
+      2
+  );
+
+  file.write(
+      (uint8_t*)&numChannels,
+      2
+  );
+
+  file.write(
+      (uint8_t*)&sampleRate,
+      4
+  );
+
+  file.write(
+      (uint8_t*)&byteRate,
+      4
+  );
+
+  file.write(
+      (uint8_t*)&blockAlign,
+      2
+  );
+
+  file.write(
+      (uint8_t*)&bitsPerSample,
+      2
+  );
+
+  // data
+  file.write(
+      (const uint8_t*)"data",
+      4
+  );
+
+  file.write(
+      (uint8_t*)&dataSize,
+      4
+  );
+}
+
+
+// =====================================================
+// I2S SETUP
+// =====================================================
+
+void setupI2S()
+{
+  i2s_config_t i2s_config;
+
+  i2s_config.mode =
+      (i2s_mode_t)(
+        I2S_MODE_MASTER |
+        I2S_MODE_RX
+      );
+
+  i2s_config.sample_rate =
+      SAMPLE_RATE;
+
+  i2s_config.bits_per_sample =
+      I2S_BITS_PER_SAMPLE_32BIT;
+
+  i2s_config.channel_format =
+      I2S_CHANNEL_FMT_ONLY_LEFT;
+
+  i2s_config.communication_format =
+      I2S_COMM_FORMAT_I2S;
+
+  i2s_config.intr_alloc_flags =
+      ESP_INTR_FLAG_LEVEL1;
+
+  i2s_config.dma_buf_count = 8;
+
+  i2s_config.dma_buf_len = 512;
+
+  i2s_config.use_apll = false;
+
+  i2s_config.tx_desc_auto_clear = false;
+
+  i2s_config.fixed_mclk = 0;
+
+
+  i2s_pin_config_t pin_config;
+
+  pin_config.bck_io_num =
+      I2S_SCK;
+
+  pin_config.ws_io_num =
+      I2S_WS;
+
+  pin_config.data_out_num =
+      I2S_PIN_NO_CHANGE;
+
+  pin_config.data_in_num =
+      I2S_SD;
+
+
+  i2s_driver_install(
+      I2S_PORT,
+      &i2s_config,
+      0,
+      NULL
+  );
+
+
+  i2s_set_pin(
+      I2S_PORT,
+      &pin_config
+  );
+
+
+  i2s_zero_dma_buffer(
+      I2S_PORT
+  );
+}
+
+
+// =====================================================
+// FIND NEXT RECORDING NAME
+// =====================================================
+
+String getFileName()
+{
+  int number = 1;
+
+  while (true)
+  {
+    String filename =
+        "/recording_" +
+        String(number) +
+        ".wav";
+
+    if (!SD.exists(filename))
+    {
+      return filename;
+    }
+
+    number++;
+  }
+}
+
+
+// =====================================================
+// RECORD AUDIO
+// =====================================================
+
+String recordAudio()
+{
+  String filename =
+      getFileName();
+
+
+  Serial.println();
+  Serial.println(
+      "=============================="
+  );
+
+  Serial.println(
+      "      RECORDING STARTED"
+  );
+
+  Serial.println(
+      "=============================="
+  );
+
+  Serial.print("File: ");
+  Serial.println(filename);
+
+
+  File audioFile =
+      SD.open(
+          filename,
+          FILE_WRITE
+      );
+
+
+  if (!audioFile)
+  {
+    Serial.println(
+        "ERROR: Cannot create file!"
+    );
+
+    return "";
+  }
+
+
+  // Reserve WAV header
+
+  for (int i = 0; i < 44; i++)
+  {
+    audioFile.write(
+        (uint8_t)0
+    );
+  }
+
+
+  int32_t i2sBuffer[512];
+
+  int16_t pcmBuffer[512];
+
+  size_t bytesRead;
+
+  uint32_t totalBytes = 0;
+
+  uint32_t startTime =
+      millis();
+
+
+  while (
+      millis() -
+      startTime <
+      RECORD_SECONDS * 1000UL
+  )
+  {
+    esp_err_t result =
+        i2s_read(
+            I2S_PORT,
+            (void*)i2sBuffer,
+            sizeof(i2sBuffer),
+            &bytesRead,
+            portMAX_DELAY
+        );
+
+
+    if (result != ESP_OK)
+    {
+      continue;
+    }
+
+
+    int samplesRead =
+        bytesRead /
+        sizeof(int32_t);
+
+
+    // Convert INMP441 32-bit
+    // samples to 16-bit PCM
+
+    for (
+        int i = 0;
+        i < samplesRead;
+        i++
+    )
+    {
+      int32_t sample =
+          i2sBuffer[i] >> 14;
+
+
+      if (sample > 32767)
+        sample = 32767;
+
+
+      if (sample < -32768)
+        sample = -32768;
+
+
+      pcmBuffer[i] =
+          (int16_t)sample;
+    }
+
+
+    size_t bytesToWrite =
+        samplesRead *
+        sizeof(int16_t);
+
+
+    audioFile.write(
+        (uint8_t*)pcmBuffer,
+        bytesToWrite
+    );
+
+
+    totalBytes +=
+        bytesToWrite;
+  }
+
+
+  // Write WAV header
+
+  writeWavHeader(
+      audioFile,
+      totalBytes
+  );
+
+
+  audioFile.close();
+
+
+  Serial.println();
+  Serial.println(
+      "RECORDING FINISHED"
+  );
+
+  Serial.print(
+      "Saved: "
+  );
+
+  Serial.println(
+      filename
+  );
+
+
+  Serial.print(
+      "Size: "
+  );
+
+  Serial.print(
+      totalBytes
+  );
+
+  Serial.println(
+      " bytes"
+  );
+
+
+  return filename;
+}
+
+
+// =====================================================
+// WEB PAGE
+// =====================================================
+
+String createWebPage()
+{
+  String page = "";
+
+  page += "<!DOCTYPE html>";
+
+  page += "<html>";
+
+  page += "<head>";
+
+  page += "<meta name='viewport' "
+          "content='width=device-width,"
+          "initial-scale=1'>";
+
+  page += "<title>ESP32 Voice Recorder</title>";
+
+  page += "<style>";
+
+  page += "body{"
+          "font-family:Arial;"
+          "background:#f2f2f2;"
+          "padding:20px;"
+          "}";
+
+  page += ".container{"
+          "max-width:700px;"
+          "margin:auto;"
+          "background:white;"
+          "padding:25px;"
+          "border-radius:15px;"
+          "box-shadow:0 2px 10px #aaa;"
+          "}";
+
+  page += "h1{color:#222;}";
+
+  page += ".recording{"
+          "padding:15px;"
+          "margin:10px 0;"
+          "background:#eee;"
+          "border-radius:10px;"
+          "}";
+
+  page += "audio{"
+          "width:100%;"
+          "}";
+
+  page += "a{"
+          "display:inline-block;"
+          "margin-top:8px;"
+          "padding:8px 12px;"
+          "background:#333;"
+          "color:white;"
+          "text-decoration:none;"
+          "border-radius:5px;"
+          "}";
+
+  page += "</style>";
+
+  page += "</head>";
+
+  page += "<body>";
+
+  page += "<div class='container'>";
+
+  page += "<h1>🎤 ESP32 Voice Recorder</h1>";
+
+  page += "<p>";
+
+  page += "Press the physical button "
+          "on the ESP32 to record.";
+
+  page += "</p>";
+
+  page += "<hr>";
+
+  page += "<h2>Recordings</h2>";
+
+
+  File root =
+      SD.open("/");
+
+
+  File file =
+      root.openNextFile();
+
+
+  bool found = false;
+
+
+  while (file)
+  {
+    String filename =
+        file.name();
+
+
+    if (
+        filename.endsWith(
+            ".wav"
+        )
+    )
+    {
+      found = true;
+
+
+      page +=
+          "<div class='recording'>";
+
+
+      page += "<b>";
+
+      page += filename;
+
+      page += "</b>";
+
+
+      page += "<br><br>";
+
+
+      page += "<audio controls>";
+
+      page +=
+          "<source src='" +
+          filename +
+          "' type='audio/wav'>";
+
+      page += "</audio>";
+
+
+      page += "<br>";
+
+
+      page +=
+          "<a href='" +
+          filename +
+          "' download>";
+
+      page +=
+          "⬇ Download";
+
+      page += "</a>";
+
+
+      page += "</div>";
+    }
+
+
+    file =
+        root.openNextFile();
+  }
+
+
+  if (!found)
+  {
+    page +=
+        "<p>No recordings found.</p>";
+  }
+
+
+  page += "</div>";
+
+  page += "</body>";
+
+  page += "</html>";
+
+
+  return page;
+}
+
+
+// =====================================================
+// WEB SERVER HOME
+// =====================================================
+
+void handleRoot()
+{
+  server.send(
+      200,
+      "text/html",
+      createWebPage()
+  );
+}
+
+
+// =====================================================
+// SERVE WAV FILE
+// =====================================================
+
+void handleFile()
+{
+  String path =
+      server.uri();
+
+
+  if (!SD.exists(path))
+  {
+    server.send(
+        404,
+        "text/plain",
+        "File not found"
+    );
+
+    return;
+  }
+
+
+  File file =
+      SD.open(path);
+
+
+  server.streamFile(
+      file,
+      "audio/wav"
+  );
+
+
+  file.close();
+}
+
+
+// =====================================================
+// SETUP
+// =====================================================
+
+void setup()
+{
+  Serial.begin(
+      115200
+  );
+
+
+  delay(1000);
+
+
+  Serial.println();
+
+  Serial.println(
+      "=============================="
+  );
+
+  Serial.println(
+      " ESP32 WIFI VOICE RECORDER"
+  );
+
+  Serial.println(
+      "=============================="
+  );
+
+
+  // -------------------------------------------------
+  // BUTTON
+  // -------------------------------------------------
+
+  pinMode(
+      BUTTON_PIN,
+      INPUT_PULLUP
+  );
+
+
+  // -------------------------------------------------
+  // SD CARD
+  // -------------------------------------------------
+
+  Serial.println(
+      "Initializing SD card..."
+  );
+
+
+  SPI.begin(
+      SD_SCK,
+      SD_MISO,
+      SD_MOSI,
+      SD_CS
+  );
+
+
+  if (
+      !SD.begin(
+          SD_CS,
+          SPI
+      )
+  )
+  {
+    Serial.println(
+        "ERROR: SD card failed!"
+    );
+
+
+    while (true)
+    {
+      delay(1000);
+    }
+  }
+
+
+  Serial.println(
+      "SD card initialized."
+  );
+
+
+  // -------------------------------------------------
+  // I2S
+  // -------------------------------------------------
+
+  Serial.println(
+      "Initializing INMP441..."
+  );
+
+
+  setupI2S();
+
+
+  Serial.println(
+      "INMP441 initialized."
+  );
+
+
+  // -------------------------------------------------
+  // WIFI
+  // -------------------------------------------------
+
+  Serial.println();
+
+  Serial.print(
+      "Connecting to WiFi: "
+  );
+
+  Serial.println(
+      WIFI_SSID
+  );
+
+
+  WiFi.begin(
+      WIFI_SSID,
+      WIFI_PASSWORD
+  );
+
+
+  while (
+      WiFi.status() !=
+      WL_CONNECTED
+  )
+  {
+    delay(500);
+
+    Serial.print(".");
+  }
+
+
+  Serial.println();
+
+  Serial.println(
+      "WiFi connected!"
+  );
+
+
+  Serial.print(
+      "ESP32 IP address: "
+  );
+
+
+  Serial.println(
+      WiFi.localIP()
+  );
+
+
+  // -------------------------------------------------
+  // WEB SERVER
+  // -------------------------------------------------
+
+  server.on(
+      "/",
+      HTTP_GET,
+      handleRoot
+  );
+
+
+  server.onNotFound(
+      handleFile
+  );
+
+
+  server.begin();
+
+
+  Serial.println(
+      "Web server started."
+  );
+
+
+  Serial.println();
+
+  Serial.println(
+      "================================"
+  );
+
+  Serial.println(
+      "READY!"
+  );
+
+  Serial.println(
+      "Press the button to record."
+  );
+
+  Serial.print(
+      "Open this address: http://"
+  );
+
+  Serial.println(
+      WiFi.localIP()
+  );
+
+  Serial.println(
+      "================================"
+  );
+}
+
+
+// =====================================================
+// LOOP
+// =====================================================
+
+void loop()
+{
+  server.handleClient();
+
+
+  // Button pressed
+
+  if (
+      digitalRead(
+          BUTTON_PIN
+      ) == LOW
+  )
+  {
+    delay(50);
+
+
+    if (
+        digitalRead(
+            BUTTON_PIN
+        ) == LOW
+    )
+    {
+      recordAudio();
+
+
+      // Wait until button released
+
+      while (
+          digitalRead(
+              BUTTON_PIN
+          ) == LOW
+      )
+      {
+        server.handleClient();
+
+        delay(10);
+      }
+
+
+      delay(100);
+
+
+      Serial.println(
+          "Ready for next recording."
+      );
+    }
+  }
+}
