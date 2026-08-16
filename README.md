@@ -2,6 +2,8 @@
 
 A compact IoT voice recorder using **ESP32, INMP441 microphone, and MicroSD storage**. Audio is recorded as WAV files using a push button and can be accessed through a **Wi-Fi web server** from a phone or PC.
 
+![ESP32-Based Wi-Fi Voice Recorder](images/img1.jpeg)
+
 ### Features
 
 * INMP441 digital microphone
