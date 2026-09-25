@@ -9,8 +9,8 @@
 // WIFI
 // =====================================================
 
-const char* WIFI_SSID = "Speed@More";
-const char* WIFI_PASSWORD = "More@15171602@04";
+const char* WIFI_SSID = "";
+const char* WIFI_PASSWORD = "";
 
 WebServer server(80);
 
